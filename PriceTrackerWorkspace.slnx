@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PriceTrackerWorkspace/PriceTrackerWorkspace.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PriceTrackerWorkspace.Tests/PriceTrackerWorkspace.Tests.csproj" />
+  </Folder>
+</Solution>
