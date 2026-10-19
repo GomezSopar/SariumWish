@@ -1,0 +1,49 @@
+html, body, body * {
+    cursor: crosshair !important;
+}
+
+.__pt-hover {
+    outline: 2px solid #3b82f6 !important;
+    outline-offset: 1px !important;
+    background-color: rgba(59, 130, 246, 0.08) !important;
+}
+
+.__pt-selected {
+    outline: 2px solid #22c55e !important;
+    outline-offset: 1px !important;
+    background-color: rgba(34, 197, 94, 0.14) !important;
+}
+
+.__pt-match {
+    outline: 2px dashed #f59e0b !important;
+    outline-offset: 2px !important;
+}
+
+#__pt-tooltip {
+    position: fixed;
+    z-index: 2147483647;
+    display: none;
+    max-width: 380px;
+    padding: 6px 9px;
+    border-radius: 6px;
+    background: #0f172a;
+    color: #e2e8f0;
+    box-shadow: 0 6px 24px rgba(15, 23, 42, 0.35);
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    pointer-events: none;
+    white-space: normal;
+    word-break: break-word;
+    text-align: left;
+}
+
+#__pt-tooltip .__pt-tooltip-tag {
+    display: block;
+    color: #93c5fd;
+    font-weight: 600;
+}
+
+#__pt-tooltip .__pt-tooltip-text {
+    display: block;
+    margin-top: 2px;
+    color: #cbd5e1;
+}
