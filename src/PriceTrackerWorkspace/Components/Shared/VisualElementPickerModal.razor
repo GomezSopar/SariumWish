@@ -1,0 +1,497 @@
+@using System.Text
+@using PriceTrackerWorkspace.Scraping.Snapshots
+@implements IAsyncDisposable
+@inject IPageSnapshotService SnapshotService
+@inject IScraperService Scraper
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject IJSRuntime JS
+@inject ILogger<VisualElementPickerModal> Logger
+
+@if (_isOpen && _target is not null)
+{
+    <div class="modal-backdrop-custom"></div>
+    <div class="modal d-block picker-modal" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+        <div class="modal-dialog modal-dialog-centered modal-fullscreen-lg-down">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div class="min-w-0">
+                        <h5 class="modal-title" id="picker-title">
+                            <i class="bi bi-cursor me-2 text-primary"></i>Visual price picker
+                        </h5>
+                        <div class="small text-body-secondary text-truncate">
+                            <span class="badge domain-badge me-2">@_target.Domain</span>@_target.ProductName
+                        </div>
+                    </div>
+                    <button type="button" class="btn-close" aria-label="Close" @onclick="CloseAsync"></button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-lg-8">
+                            <div class="picker-frame-wrap">
+                                @if (_phase == PickerPhase.Ready)
+                                {
+                                    <iframe @ref="_frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="Sanitized page snapshot"></iframe>
+                                }
+                                else if (_phase == PickerPhase.Loading)
+                                {
+                                    <div class="picker-frame-overlay">
+                                        <div class="spinner-border text-primary" role="status"></div>
+                                        <div>
+                                            <div class="fw-semibold text-body">Rendering the page in headless Chromium…</div>
+                                            <div class="small">Waiting for dynamic prices, then stripping scripts and injecting the inspector.</div>
+                                        </div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="picker-frame-overlay">
+                                        <i class="bi bi-exclamation-octagon fs-1 text-danger"></i>
+                                        <div>
+                                            <div class="fw-semibold text-body">The page snapshot could not be captured</div>
+                                            <div class="small">@_snapshotError</div>
+                                        </div>
+                                        <button type="button" class="btn btn-sm btn-outline-primary" @onclick="CaptureSnapshotAsync">
+                                            <i class="bi bi-arrow-repeat me-1"></i>Try again
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+                            <div class="small text-body-secondary mt-2">
+                                <i class="bi bi-info-circle me-1"></i>
+                                Hover to inspect elements and click the price. Use <kbd>↑</kbd> / <kbd>↓</kbd> to move the selection to the parent or first child.
+                            </div>
+                        </div>
+
+                        <div class="col-lg-4">
+                            <label class="form-label fw-semibold" for="picker-selector">CSS selector</label>
+                            <textarea id="picker-selector"
+                                      class="form-control selector-code"
+                                      rows="3"
+                                      placeholder="Click an element in the snapshot"
+                                      @bind="_selector"
+                                      @bind:after="PreviewSelectorAsync"></textarea>
+                            <div class="d-flex justify-content-between align-items-center mt-1 small">
+                                <span class="text-body-secondary">Edit and leave the field to re-evaluate.</span>
+                                @if (_matchCount is { } count)
+                                {
+                                    <span class="badge @(count == 1 ? "text-bg-success" : count == 0 ? "text-bg-danger" : "text-bg-warning")">
+                                        @count match@(count == 1 ? string.Empty : "es")
+                                    </span>
+                                }
+                            </div>
+                            @if (_selectorError is not null)
+                            {
+                                <div class="text-danger small mt-1">@_selectorError</div>
+                            }
+
+                            <div class="mt-3">
+                                <div class="form-label fw-semibold mb-1">Raw extracted text</div>
+                                <div class="p-2 rounded border bg-body-tertiary small selector-code" style="min-height: 2.5rem;">
+                                    @(string.IsNullOrEmpty(_rawText) ? "—" : _rawText)
+                                </div>
+                            </div>
+
+                            <div class="mt-3">
+                                <div class="form-label fw-semibold mb-1">Parsed price</div>
+                                @if (ParsedPreview is { IsPositive: true } parsed)
+                                {
+                                    <div class="picker-preview-price text-success">@Display.Money(parsed.Amount, parsed.CurrencySymbol)</div>
+                                    @if (!parsed.HasCurrency)
+                                    {
+                                        <div class="small text-body-secondary">No currency symbol detected; the item's current currency will be kept.</div>
+                                    }
+                                }
+                                else if (!string.IsNullOrEmpty(_rawText))
+                                {
+                                    <div class="text-warning small">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>No price found in this text. Try the parent element (<kbd>↑</kbd>).
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="text-body-secondary small">Select an element to preview the parsed value.</div>
+                                }
+                            </div>
+
+                            @if (!string.IsNullOrWhiteSpace(_pageTitle))
+                            {
+                                <div class="mt-3 small">
+                                    <span class="text-body-secondary">Page title:</span> @_pageTitle
+                                </div>
+                            }
+
+                            <div class="mt-3">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" disabled="@(_testing || string.IsNullOrWhiteSpace(_selector))" @onclick="TestOnLivePageAsync">
+                                    @if (_testing)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-broadcast me-1"></i>
+                                    }
+                                    Test on live page
+                                </button>
+                                @if (_liveTest is not null)
+                                {
+                                    <div class="small mt-2 @(_liveTest.Success ? "text-success" : "text-danger")">
+                                        @if (_liveTest is { Success: true, Price: { } livePrice })
+                                        {
+                                            <i class="bi bi-check-circle me-1"></i>@($"Live page returned {Display.Money(livePrice.Amount, livePrice.CurrencySymbol)}")
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-x-circle me-1"></i>@_liveTest.Error
+                                        }
+                                    </div>
+                                }
+                            </div>
+
+                            <div class="form-check mt-3">
+                                <input class="form-check-input" type="checkbox" id="picker-recheck" @bind="_recheckDomainItems" />
+                                <label class="form-check-label small" for="picker-recheck">
+                                    Re-check other items on <strong>@_target.Domain</strong> with this selector
+                                </label>
+                            </div>
+
+                            @if (_saveError is not null)
+                            {
+                                <div class="alert alert-danger small mt-3 mb-0">@_saveError</div>
+                            }
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" @onclick="CloseAsync">Cancel</button>
+                    <button type="button" class="btn btn-primary" disabled="@(!CanSave)" @onclick="SaveAsync">
+                        @if (_saving)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                        }
+                        else
+                        {
+                            <i class="bi bi-save me-1"></i>
+                        }
+                        Save Selector for Domain &amp; Update Price
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private const string BridgeModulePath = "./js/elementPickerBridge.js";
+
+    private PickerTarget? _target;
+    private PickerPhase _phase;
+    private bool _isOpen;
+    private PageSnapshot? _snapshot;
+    private bool _snapshotPendingLoad;
+    private string? _snapshotError;
+    private string _selector = string.Empty;
+    private string? _selectorError;
+    private string? _rawText;
+    private string? _pageTitle;
+    private int? _matchCount;
+    private bool _recheckDomainItems = true;
+    private bool _testing;
+    private bool _saving;
+    private string? _saveError;
+    private SelectorTestResult? _liveTest;
+
+    private ElementReference _frame;
+    private IJSObjectReference? _module;
+    private IJSObjectReference? _controller;
+    private DotNetObjectReference<VisualElementPickerModal>? _selfReference;
+    private CancellationTokenSource? _cts;
+
+    [Parameter]
+    public EventCallback<PickerSavedEventArgs> OnSaved { get; set; }
+
+    private ParsedPrice? ParsedPreview => PriceParser.Parse(_rawText);
+
+    private bool CanSave => !_saving && !string.IsNullOrWhiteSpace(_selector) && ParsedPreview is { IsPositive: true };
+
+    public async Task OpenAsync(int wishlistItemId)
+    {
+        await CloseAsync();
+
+        await using (var db = await DbFactory.CreateDbContextAsync())
+        {
+            var item = await db.WishlistItems.AsNoTracking().SingleOrDefaultAsync(i => i.Id == wishlistItemId);
+            if (item is null)
+            {
+                return;
+            }
+
+            var ruleSelector = await db.DomainScrapeRules
+                .AsNoTracking()
+                .Where(r => r.NormalizedDomain == item.NormalizedDomain)
+                .Select(r => r.PriceCssSelector)
+                .FirstOrDefaultAsync();
+
+            _target = new PickerTarget(item.Id, item.ProductName, item.ProductUrl, item.NormalizedDomain);
+            _selector = item.CustomCssSelectorOverride ?? ruleSelector ?? string.Empty;
+        }
+
+        _isOpen = true;
+        await CaptureSnapshotAsync();
+    }
+
+    [JSInvokable]
+    public async Task OnInspectorReady(string? pageTitle)
+    {
+        _pageTitle ??= pageTitle;
+
+        if (!string.IsNullOrWhiteSpace(_selector))
+        {
+            await PreviewSelectorAsync();
+        }
+    }
+
+    [JSInvokable]
+    public void OnElementSelected(PickedElement picked)
+    {
+        _selector = picked.Selector;
+        _rawText = picked.RawText;
+        _matchCount = picked.MatchCount;
+        _pageTitle = string.IsNullOrWhiteSpace(picked.PageTitle) ? _pageTitle : picked.PageTitle;
+        _selectorError = null;
+        _liveTest = null;
+        _saveError = null;
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public void OnSelectorEvaluated(SelectorEvaluation evaluation)
+    {
+        if (!string.Equals(evaluation.Selector, _selector.Trim(), StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _matchCount = evaluation.Error is null ? evaluation.MatchCount : null;
+        _rawText = evaluation.RawText;
+        _selectorError = evaluation.Error ?? (evaluation.MatchCount == 0 ? "No element in the snapshot matches this selector." : null);
+        StateHasChanged();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_snapshotPendingLoad || _snapshot is null || _phase != PickerPhase.Ready)
+        {
+            return;
+        }
+
+        _snapshotPendingLoad = false;
+
+        try
+        {
+            _module ??= await JS.InvokeAsync<IJSObjectReference>("import", BridgeModulePath);
+            _selfReference ??= DotNetObjectReference.Create(this);
+
+            await DisposeControllerAsync();
+            _controller = await _module.InvokeAsync<IJSObjectReference>("attach", _frame, _selfReference);
+
+            using var streamReference = new DotNetStreamReference(new MemoryStream(Encoding.UTF8.GetBytes(_snapshot.Html)));
+            await _controller.InvokeVoidAsync("load", streamReference);
+        }
+        catch (JSException ex)
+        {
+            Logger.LogWarning(ex, "Loading the page snapshot into the picker iframe failed");
+            _phase = PickerPhase.Failed;
+            _snapshotError = "The browser could not display the snapshot.";
+            StateHasChanged();
+        }
+    }
+
+    private async Task CaptureSnapshotAsync()
+    {
+        if (_target is null)
+        {
+            return;
+        }
+
+        CancelPendingWork();
+        _cts = new CancellationTokenSource();
+        var token = _cts.Token;
+
+        _phase = PickerPhase.Loading;
+        _snapshotError = null;
+        _snapshot = null;
+        StateHasChanged();
+
+        try
+        {
+            _snapshot = await SnapshotService.CaptureAsync(_target.Url, token);
+            _pageTitle = _snapshot.Title;
+            _phase = PickerPhase.Ready;
+            _snapshotPendingLoad = true;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Capturing a snapshot of {Url} failed", _target.Url);
+            _phase = PickerPhase.Failed;
+            _snapshotError = ex.Message.Split('\n', 2)[0];
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task PreviewSelectorAsync()
+    {
+        _liveTest = null;
+        _saveError = null;
+
+        if (string.IsNullOrWhiteSpace(_selector))
+        {
+            _matchCount = null;
+            _rawText = null;
+            _selectorError = null;
+            return;
+        }
+
+        if (_controller is not null)
+        {
+            await _controller.InvokeVoidAsync("evaluate", _selector.Trim());
+        }
+    }
+
+    private async Task TestOnLivePageAsync()
+    {
+        if (_target is null)
+        {
+            return;
+        }
+
+        _testing = true;
+        try
+        {
+            _liveTest = await Scraper.TestSelectorAsync(_target.Url, _selector, _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException)
+        {
+            _liveTest = null;
+        }
+        finally
+        {
+            _testing = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_target is null || _rawText is null)
+        {
+            return;
+        }
+
+        _saving = true;
+        _saveError = null;
+
+        try
+        {
+            var result = await Scraper.SaveVisualSelectionAsync(new VisualSelection(_target.Id, _selector, _rawText, _pageTitle));
+            var recheck = _recheckDomainItems;
+            await CloseAsync();
+            await OnSaved.InvokeAsync(new PickerSavedEventArgs(result, recheck));
+        }
+        catch (ArgumentException ex)
+        {
+            _saveError = ex.Message;
+        }
+        catch (KeyNotFoundException)
+        {
+            _saveError = "This wishlist item no longer exists.";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        CancelPendingWork();
+        await DisposeControllerAsync();
+
+        _isOpen = false;
+        _target = null;
+        _snapshot = null;
+        _snapshotPendingLoad = false;
+        _snapshotError = null;
+        _selector = string.Empty;
+        _selectorError = null;
+        _rawText = null;
+        _pageTitle = null;
+        _matchCount = null;
+        _liveTest = null;
+        _saveError = null;
+        _recheckDomainItems = true;
+    }
+
+    private void CancelPendingWork()
+    {
+        _cts?.Cancel();
+        _cts?.Dispose();
+        _cts = null;
+    }
+
+    private async Task DisposeControllerAsync()
+    {
+        if (_controller is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _controller.InvokeVoidAsync("dispose");
+            await _controller.DisposeAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+
+        _controller = null;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        CancelPendingWork();
+        await DisposeControllerAsync();
+
+        if (_module is not null)
+        {
+            try
+            {
+                await _module.DisposeAsync();
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+
+        _selfReference?.Dispose();
+    }
+
+    private enum PickerPhase
+    {
+        Loading,
+        Ready,
+        Failed
+    }
+
+    private sealed record PickerTarget(int Id, string ProductName, string Url, string Domain);
+
+    public sealed record PickedElement(string Selector, string? RawText, string? PageTitle, string? TagName, int MatchCount);
+
+    public sealed record SelectorEvaluation(string Selector, string? RawText, int MatchCount, string? Error);
+}
