@@ -1,0 +1,37 @@
+@using PriceTrackerWorkspace.Domain
+
+<span class="badge rounded-pill @CssClass" title="@Message">
+    <i class="bi @Icon me-1"></i>@Label
+</span>
+
+@code {
+    [Parameter, EditorRequired]
+    public WishlistItemStatus Status { get; set; }
+
+    [Parameter]
+    public string? Message { get; set; }
+
+    private string CssClass => Status switch
+    {
+        WishlistItemStatus.Verified => "text-bg-success",
+        WishlistItemStatus.NeedsElementSelection => "text-bg-warning",
+        WishlistItemStatus.ScrapeFailed => "text-bg-danger",
+        _ => "text-bg-secondary"
+    };
+
+    private string Icon => Status switch
+    {
+        WishlistItemStatus.Verified => "bi-patch-check-fill",
+        WishlistItemStatus.NeedsElementSelection => "bi-cursor-fill",
+        WishlistItemStatus.ScrapeFailed => "bi-exclamation-octagon-fill",
+        _ => "bi-hourglass-split"
+    };
+
+    private string Label => Status switch
+    {
+        WishlistItemStatus.Verified => "Verified",
+        WishlistItemStatus.NeedsElementSelection => "Needs selection",
+        WishlistItemStatus.ScrapeFailed => "Failed",
+        _ => "Pending"
+    };
+}

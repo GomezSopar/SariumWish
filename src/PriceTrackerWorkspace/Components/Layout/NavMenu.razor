@@ -1,0 +1,81 @@
+﻿@implements IDisposable
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject NavigationManager Navigation
+
+<div class="sidebar-brand">
+    <a href="" class="d-flex align-items-center gap-2 text-decoration-none" @onclick="OnNavigate">
+        <span class="brand-mark"><i class="bi bi-bullseye"></i></span>
+        <span>
+            <span class="brand-name">Sarium</span>
+            <span class="brand-tagline">Workspace &amp; price tracker</span>
+        </span>
+    </a>
+</div>
+
+<nav class="sidebar-nav" @onclick="OnNavigate">
+    <div class="sidebar-section">Overview</div>
+    <NavLink class="sidebar-link" href="" Match="NavLinkMatch.All">
+        <i class="bi bi-speedometer2"></i><span>Dashboard</span>
+    </NavLink>
+    <NavLink class="sidebar-link" href="projects" Match="NavLinkMatch.All">
+        <i class="bi bi-kanban"></i><span>Projects</span>
+    </NavLink>
+    <NavLink class="sidebar-link" href="wishlist">
+        <i class="bi bi-bag-heart"></i><span>General Workspace</span>
+    </NavLink>
+    <NavLink class="sidebar-link" href="domain-rules">
+        <i class="bi bi-braces-asterisk"></i><span>Domain Rules</span>
+    </NavLink>
+
+    @if (_projects.Count > 0)
+    {
+        <div class="sidebar-section mt-3">Projects</div>
+        @foreach (var project in _projects)
+        {
+            <NavLink class="sidebar-link sidebar-link-sm" href="@($"projects/{project.Id}")">
+                <i class="bi bi-folder2"></i><span class="text-truncate">@project.Name</span>
+                @if (project.OpenTasks > 0)
+                {
+                    <span class="badge rounded-pill text-bg-secondary ms-auto">@project.OpenTasks</span>
+                }
+            </NavLink>
+        }
+    }
+</nav>
+
+@code {
+    private const int MaxListedProjects = 8;
+
+    private List<ProjectLink> _projects = [];
+
+    [Parameter]
+    public EventCallback OnNavigate { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Navigation.LocationChanged += HandleLocationChanged;
+        await LoadProjectsAsync();
+    }
+
+    public void Dispose() => Navigation.LocationChanged -= HandleLocationChanged;
+
+    private void HandleLocationChanged(object? sender, LocationChangedEventArgs e) =>
+        _ = InvokeAsync(async () =>
+        {
+            await LoadProjectsAsync();
+            StateHasChanged();
+        });
+
+    private async Task LoadProjectsAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _projects = await db.WorkspaceProjects
+            .AsNoTracking()
+            .OrderByDescending(p => p.CreatedAt)
+            .Take(MaxListedProjects)
+            .Select(p => new ProjectLink(p.Id, p.Name, p.TodoItems.Count(t => !t.IsCompleted)))
+            .ToListAsync();
+    }
+
+    private sealed record ProjectLink(int Id, string Name, int OpenTasks);
+}

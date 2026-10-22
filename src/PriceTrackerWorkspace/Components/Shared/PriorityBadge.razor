@@ -1,0 +1,8 @@
+@using PriceTrackerWorkspace.Domain
+
+<span class="badge priority-badge priority-@Priority.ToString().ToLowerInvariant()">@Priority</span>
+
+@code {
+    [Parameter, EditorRequired]
+    public TodoPriority Priority { get; set; }
+}

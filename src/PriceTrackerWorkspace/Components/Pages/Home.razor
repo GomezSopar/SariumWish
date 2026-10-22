@@ -1,0 +1,315 @@
+﻿@page "/"
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject TimeProvider Clock
+
+<PageTitle>Dashboard</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Workspace overview</h1>
+        <p class="lead">Tasks, tracked products and budgets across every project.</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="projects" class="btn btn-primary"><i class="bi bi-folder-plus me-1"></i>New project</a>
+        <a href="wishlist" class="btn btn-outline-secondary"><i class="bi bi-bag-plus me-1"></i>Track a product</a>
+    </div>
+</div>
+
+@if (_overview is not { } overview)
+{
+    <div class="text-body-secondary"><span class="spinner-border spinner-border-sm me-2"></span>Loading dashboard…</div>
+}
+else
+{
+    <div class="row g-3 mb-4">
+        <div class="col-sm-6 col-xl-3">
+            <div class="surface-card stat-card">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <div class="stat-label">Active projects</div>
+                        <div class="stat-value">@overview.Projects.Count</div>
+                    </div>
+                    <span class="stat-icon icon-blue"><i class="bi bi-kanban"></i></span>
+                </div>
+                <div class="small text-body-secondary mt-2">@overview.Projects.Count(p => p.TargetBudget is not null) with a target budget</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-xl-3">
+            <div class="surface-card stat-card">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <div class="stat-label">Pending tasks</div>
+                        <div class="stat-value">@overview.PendingTasks</div>
+                    </div>
+                    <span class="stat-icon icon-amber"><i class="bi bi-list-check"></i></span>
+                </div>
+                <div class="small mt-2 @(overview.OverdueTasks > 0 ? "text-danger" : "text-body-secondary")">
+                    @(overview.OverdueTasks > 0 ? $"{overview.OverdueTasks} overdue" : "Nothing overdue")
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-xl-3">
+            <div class="surface-card stat-card">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <div class="stat-label">Wishlist total</div>
+                        <div class="stat-value">@Display.Money(overview.Wishlist.Primary)</div>
+                    </div>
+                    <span class="stat-icon icon-green"><i class="bi bi-cart-check"></i></span>
+                </div>
+                <div class="small text-body-secondary mt-2">
+                    @overview.Wishlist.IncludedCount items included
+                    @if (overview.Wishlist.ByCurrency.Count > 1)
+                    {
+                        <span> · + @Display.Totals(overview.Wishlist.ByCurrency.Skip(1).ToList())</span>
+                    }
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-xl-3">
+            <div class="surface-card stat-card">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <div class="stat-label">Budget used</div>
+                        <div class="stat-value">@(overview.BudgetUtilization is { } used ? Display.Percent(used) : "—")</div>
+                    </div>
+                    <span class="stat-icon icon-violet"><i class="bi bi-piggy-bank"></i></span>
+                </div>
+                <div class="small text-body-secondary mt-2">
+                    @(overview.CombinedBudget > 0
+                        ? $"{Display.Money(overview.BudgetedSpend, overview.Wishlist.Primary.Symbol)} of {Display.Money(overview.CombinedBudget, overview.Wishlist.Primary.Symbol)} across budgeted projects"
+                        : "Set project budgets to track spend")
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-7">
+            <div class="surface-card">
+                <div class="card-header d-flex align-items-center">
+                    <i class="bi bi-bar-chart-line me-2 text-primary"></i>Wishlist vs. target budget
+                    <a href="projects" class="ms-auto small">All projects</a>
+                </div>
+                @if (overview.Projects.Count == 0)
+                {
+                    <div class="empty-state"><i class="bi bi-folder2"></i>No projects yet.</div>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table align-middle mb-0">
+                            <thead class="small text-body-secondary">
+                                <tr>
+                                    <th class="ps-3">Project</th>
+                                    <th class="text-end">Wishlist</th>
+                                    <th style="width: 38%;">Budget</th>
+                                    <th class="text-end pe-3">Open tasks</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var project in overview.Projects)
+                                {
+                                    var ratio = project.Totals.BudgetUtilization(project.TargetBudget);
+                                    <tr @key="project.Id">
+                                        <td class="ps-3"><a href="@($"projects/{project.Id}")" class="fw-medium text-decoration-none">@project.Name</a></td>
+                                        <td class="text-end text-nowrap">@Display.Money(project.Totals.Primary)</td>
+                                        <td>
+                                            @if (ratio is { } r)
+                                            {
+                                                <div class="d-flex align-items-center gap-2">
+                                                    <div class="progress flex-grow-1" style="height: 8px;">
+                                                        <div class="progress-bar @(r > 1 ? "bg-danger" : r > 0.85 ? "bg-warning" : "bg-success")" style="width: @(Math.Min(r, 1) * 100)%"></div>
+                                                    </div>
+                                                    <span class="small text-nowrap @(r > 1 ? "text-danger" : "text-body-secondary")">@Display.Percent(r) of @Display.Money(project.TargetBudget!.Value, project.Totals.Primary.Symbol)</span>
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <span class="small text-body-secondary">No budget</span>
+                                            }
+                                        </td>
+                                        <td class="text-end pe-3">@project.OpenTasks</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </div>
+
+            <div class="surface-card mt-4">
+                <div class="card-header d-flex align-items-center">
+                    <i class="bi bi-graph-down-arrow me-2 price-drop"></i>Recent price drops
+                </div>
+                @if (overview.PriceDrops.Count == 0)
+                {
+                    <div class="empty-state"><i class="bi bi-tags"></i>No price drops detected yet. Refresh prices to check.</div>
+                }
+                else
+                {
+                    <ul class="list-group list-group-flush">
+                        @foreach (var item in overview.PriceDrops)
+                        {
+                            <li class="list-group-item d-flex align-items-center gap-3 bg-transparent" @key="item.Id">
+                                <div class="flex-grow-1 min-w-0">
+                                    <a href="@item.ProductUrl" target="_blank" rel="noopener noreferrer" class="fw-medium text-truncate d-block">@item.ProductName</a>
+                                    <span class="badge domain-badge">@item.NormalizedDomain</span>
+                                </div>
+                                <div class="text-end text-nowrap">
+                                    <div class="fw-semibold">@Display.Money(item.CurrentPrice, item.CurrencySymbol)</div>
+                                    <div class="small price-drop">
+                                        <i class="bi bi-arrow-down-right"></i>@Display.Money(-item.PriceChange, item.CurrencySymbol)
+                                        <span class="text-body-secondary text-decoration-line-through ms-1">@Display.Money(item.PreviousPrice ?? 0, item.CurrencySymbol)</span>
+                                    </div>
+                                </div>
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+        </div>
+
+        <div class="col-xl-5">
+            <div class="surface-card">
+                <div class="card-header"><i class="bi bi-calendar2-week me-2 text-primary"></i>Upcoming tasks</div>
+                @if (overview.UpcomingTasks.Count == 0)
+                {
+                    <div class="empty-state"><i class="bi bi-cup-hot"></i>All caught up.</div>
+                }
+                else
+                {
+                    <ul class="list-group list-group-flush">
+                        @foreach (var task in overview.UpcomingTasks)
+                        {
+                            <li class="list-group-item bg-transparent" @key="task.Id">
+                                <div class="d-flex justify-content-between gap-2">
+                                    <span class="fw-medium">@task.Title</span>
+                                    <PriorityBadge Priority="task.Priority" />
+                                </div>
+                                <div class="small d-flex justify-content-between mt-1">
+                                    <a class="text-body-secondary text-decoration-none" href="@(task.ProjectId is { } projectId ? $"projects/{projectId}" : "wishlist")">
+                                        <i class="bi bi-folder2 me-1"></i>@(task.ProjectName ?? "General")
+                                    </a>
+                                    @if (task.DueDate is { } due)
+                                    {
+                                        <span class="@(due < Today ? "text-danger fw-semibold" : "text-body-secondary")">
+                                            <i class="bi bi-calendar-event me-1"></i>@Display.Date(due)
+                                        </span>
+                                    }
+                                </div>
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+
+            <div class="surface-card mt-4">
+                <div class="card-header d-flex align-items-center">
+                    <i class="bi bi-exclamation-diamond me-2 text-warning"></i>Needs attention
+                    <a href="domain-rules" class="ms-auto small">@overview.RuleCount learned domain rules</a>
+                </div>
+                @if (overview.NeedsAttention.Count == 0)
+                {
+                    <div class="empty-state"><i class="bi bi-shield-check"></i>Every tracked product resolved its price.</div>
+                }
+                else
+                {
+                    <ul class="list-group list-group-flush">
+                        @foreach (var item in overview.NeedsAttention)
+                        {
+                            <li class="list-group-item bg-transparent d-flex align-items-center gap-2" @key="item.Id">
+                                <div class="flex-grow-1 min-w-0">
+                                    <a class="fw-medium text-truncate d-block text-decoration-none" href="@(item.WorkspaceProjectId is { } projectId ? $"projects/{projectId}" : "wishlist")">@item.ProductName</a>
+                                    <div class="small text-body-secondary text-truncate" title="@item.LastErrorMessage">@item.LastErrorMessage</div>
+                                </div>
+                                <StatusBadge Status="item.Status" Message="@item.LastErrorMessage" />
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private const int ListLimit = 6;
+
+    private DashboardOverview? _overview;
+
+    private DateOnly Today => DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var today = Today;
+
+        var projects = await db.WorkspaceProjects
+            .AsNoTracking()
+            .OrderBy(p => p.Name)
+            .Select(p => new
+            {
+                p.Id,
+                p.Name,
+                p.TargetBudget,
+                OpenTasks = p.TodoItems.Count(t => !t.IsCompleted),
+                Items = p.WishlistItems.ToList()
+            })
+            .AsSplitQuery()
+            .ToListAsync();
+
+        var allItems = await db.WishlistItems.AsNoTracking().ToListAsync();
+        var pendingTasks = await db.TodoItems.CountAsync(t => !t.IsCompleted);
+        var overdueTasks = await db.TodoItems.CountAsync(t => !t.IsCompleted && t.DueDate < today);
+        var ruleCount = await db.DomainScrapeRules.CountAsync();
+
+        var upcoming = await db.TodoItems
+            .AsNoTracking()
+            .Where(t => !t.IsCompleted)
+            .OrderBy(t => t.DueDate == null)
+            .ThenBy(t => t.DueDate)
+            .ThenByDescending(t => t.Priority)
+            .Take(ListLimit)
+            .Select(t => new UpcomingTask(t.Id, t.Title, t.Priority, t.DueDate, t.WorkspaceProjectId, t.WorkspaceProject != null ? t.WorkspaceProject.Name : null))
+            .ToListAsync();
+
+        var projectSummaries = projects
+            .Select(p => new ProjectSummary(p.Id, p.Name, p.TargetBudget, p.OpenTasks, WishlistTotals.From(p.Items)))
+            .ToList();
+
+        var budgeted = projectSummaries.Where(p => p.TargetBudget is > 0).ToList();
+        var combinedBudget = budgeted.Sum(p => p.TargetBudget!.Value);
+        var budgetedSpend = budgeted.Sum(p => p.Totals.Primary.Amount);
+
+        _overview = new DashboardOverview(
+            projectSummaries,
+            pendingTasks,
+            overdueTasks,
+            WishlistTotals.From(allItems),
+            combinedBudget,
+            budgetedSpend,
+            combinedBudget > 0 ? (double)(budgetedSpend / combinedBudget) : null,
+            upcoming,
+            [.. allItems.Where(i => i.HasPriceDrop).OrderBy(i => i.PriceChange).Take(ListLimit)],
+            [.. allItems.Where(i => i.Status is WishlistItemStatus.NeedsElementSelection or WishlistItemStatus.ScrapeFailed).Take(ListLimit)],
+            ruleCount);
+    }
+
+    private sealed record ProjectSummary(int Id, string Name, decimal? TargetBudget, int OpenTasks, WishlistTotals Totals);
+
+    private sealed record UpcomingTask(int Id, string Title, TodoPriority Priority, DateOnly? DueDate, int? ProjectId, string? ProjectName);
+
+    private sealed record DashboardOverview(
+        IReadOnlyList<ProjectSummary> Projects,
+        int PendingTasks,
+        int OverdueTasks,
+        WishlistTotals Wishlist,
+        decimal CombinedBudget,
+        decimal BudgetedSpend,
+        double? BudgetUtilization,
+        IReadOnlyList<UpcomingTask> UpcomingTasks,
+        IReadOnlyList<WishlistItem> PriceDrops,
+        IReadOnlyList<WishlistItem> NeedsAttention,
+        int RuleCount);
+}
