@@ -1,0 +1,197 @@
+@page "/projects"
+@using System.ComponentModel.DataAnnotations
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject NavigationManager Navigation
+@inject TimeProvider Clock
+
+<PageTitle>Projects</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1><i class="bi bi-kanban text-primary me-2"></i>Projects</h1>
+        <p class="lead">Group tasks and tracked products under a shared goal and budget.</p>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-xl-4">
+        <div class="surface-card">
+            <div class="card-header"><i class="bi bi-plus-circle me-2 text-primary"></i>New project</div>
+            <EditForm Model="_draft" OnValidSubmit="CreateAsync" class="p-3">
+                <DataAnnotationsValidator />
+                <div class="mb-3">
+                    <label class="form-label" for="project-name">Name</label>
+                    <InputText id="project-name" class="form-control" @bind-Value="_draft.Name" placeholder="e.g. Home office upgrade" />
+                    <ValidationMessage For="() => _draft.Name" />
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="project-description">Description</label>
+                    <InputTextArea id="project-description" class="form-control" rows="3" @bind-Value="_draft.Description" />
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="project-budget">Target budget</label>
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="bi bi-piggy-bank"></i></span>
+                        <InputNumber id="project-budget" class="form-control" step="0.01" @bind-Value="_draft.TargetBudget" placeholder="Optional" />
+                    </div>
+                    <ValidationMessage For="() => _draft.TargetBudget" />
+                </div>
+                <button type="submit" class="btn btn-primary w-100"><i class="bi bi-folder-plus me-1"></i>Create project</button>
+            </EditForm>
+        </div>
+    </div>
+
+    <div class="col-xl-8">
+        @if (_projects is null)
+        {
+            <div class="text-body-secondary"><span class="spinner-border spinner-border-sm me-2"></span>Loading projects…</div>
+        }
+        else if (_projects.Count == 0)
+        {
+            <div class="surface-card empty-state">
+                <i class="bi bi-folder2"></i>
+                No projects yet. Create one to start planning.
+            </div>
+        }
+        else
+        {
+            <div class="row g-3">
+                @foreach (var project in _projects)
+                {
+                    var utilization = project.Totals.BudgetUtilization(project.TargetBudget);
+                    <div class="col-md-6" @key="project.Id">
+                        <div class="surface-card h-100 p-3 d-flex flex-column">
+                            <div class="d-flex align-items-start gap-2">
+                                <a class="h6 mb-1 text-decoration-none flex-grow-1" href="@($"projects/{project.Id}")">@project.Name</a>
+                                @if (_pendingDeleteId == project.Id)
+                                {
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-danger" @onclick="() => DeleteAsync(project.Id)">Delete</button>
+                                        <button type="button" class="btn btn-outline-secondary" @onclick="() => _pendingDeleteId = null">Keep</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <button type="button" class="btn btn-sm btn-link text-body-secondary p-0" title="Delete project" @onclick="() => _pendingDeleteId = project.Id">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                }
+                            </div>
+                            @if (_pendingDeleteId == project.Id)
+                            {
+                                <div class="small text-danger mb-2">Tasks are deleted; wishlist items move to the General Workspace.</div>
+                            }
+                            <p class="small text-body-secondary mb-3">@(string.IsNullOrWhiteSpace(project.Description) ? "No description." : project.Description)</p>
+
+                            <div class="d-flex justify-content-between small mb-1 mt-auto">
+                                <span><i class="bi bi-check2-square me-1"></i>@project.OpenTasks open / @project.TotalTasks tasks</span>
+                                <span><i class="bi bi-bag me-1"></i>@project.WishlistCount items</span>
+                            </div>
+
+                            <div class="d-flex justify-content-between small fw-semibold">
+                                <span>@Display.Money(project.Totals.Primary)</span>
+                                <span class="text-body-secondary">@(project.TargetBudget is { } budget ? $"of {Display.Money(budget, project.Totals.Primary.Symbol)}" : "no budget")</span>
+                            </div>
+                            @if (utilization is { } ratio)
+                            {
+                                <div class="progress mt-1" style="height: 6px;">
+                                    <div class="progress-bar @(ratio > 1 ? "bg-danger" : ratio > 0.85 ? "bg-warning" : "bg-success")" style="width: @(Math.Min(ratio, 1) * 100)%"></div>
+                                </div>
+                            }
+                            <div class="small text-body-secondary mt-2">Created @Display.Relative(project.CreatedAt, Clock.GetUtcNow().UtcDateTime)</div>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private List<ProjectCard>? _projects;
+    private ProjectDraft _draft = new();
+    private int? _pendingDeleteId;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var projects = await db.WorkspaceProjects
+            .AsNoTracking()
+            .OrderByDescending(p => p.CreatedAt)
+            .Select(p => new
+            {
+                p.Id,
+                p.Name,
+                p.Description,
+                p.TargetBudget,
+                p.CreatedAt,
+                TotalTasks = p.TodoItems.Count,
+                OpenTasks = p.TodoItems.Count(t => !t.IsCompleted),
+                Items = p.WishlistItems.ToList()
+            })
+            .AsSplitQuery()
+            .ToListAsync();
+
+        _projects = [.. projects.Select(p => new ProjectCard(
+            p.Id,
+            p.Name,
+            p.Description,
+            p.TargetBudget,
+            p.CreatedAt,
+            p.TotalTasks,
+            p.OpenTasks,
+            p.Items.Count,
+            WishlistTotals.From(p.Items)))];
+    }
+
+    private async Task CreateAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var project = new WorkspaceProject
+        {
+            Name = _draft.Name.Trim(),
+            Description = string.IsNullOrWhiteSpace(_draft.Description) ? null : _draft.Description.Trim(),
+            TargetBudget = _draft.TargetBudget,
+            CreatedAt = Clock.GetUtcNow().UtcDateTime
+        };
+        db.WorkspaceProjects.Add(project);
+        await db.SaveChangesAsync();
+
+        Navigation.NavigateTo($"projects/{project.Id}");
+    }
+
+    private async Task DeleteAsync(int projectId)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        await db.WorkspaceProjects.Where(p => p.Id == projectId).ExecuteDeleteAsync();
+
+        _pendingDeleteId = null;
+        await LoadAsync();
+    }
+
+    private sealed record ProjectCard(
+        int Id,
+        string Name,
+        string? Description,
+        decimal? TargetBudget,
+        DateTime CreatedAt,
+        int TotalTasks,
+        int OpenTasks,
+        int WishlistCount,
+        WishlistTotals Totals);
+
+    private sealed class ProjectDraft
+    {
+        [Required(ErrorMessage = "A project needs a name.")]
+        [StringLength(120)]
+        public string Name { get; set; } = string.Empty;
+
+        [StringLength(2000)]
+        public string? Description { get; set; }
+
+        [Range(typeof(decimal), "0", "999999999", ErrorMessage = "Budget must be a positive amount.")]
+        public decimal? TargetBudget { get; set; }
+    }
+}

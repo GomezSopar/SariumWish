@@ -1,0 +1,215 @@
+@using System.ComponentModel.DataAnnotations
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject TimeProvider Clock
+
+<div class="surface-card h-100">
+    <div class="card-header d-flex align-items-center gap-2">
+        <i class="bi bi-check2-square text-primary"></i>
+        <span>Todo checklist</span>
+        <span class="badge rounded-pill text-bg-secondary">@_items.Count(i => !i.IsCompleted) open</span>
+        <div class="btn-group btn-group-sm ms-auto" role="group" aria-label="Filter tasks">
+            @foreach (var filter in Enum.GetValues<TodoFilter>())
+            {
+                <button type="button" class="btn @(_filter == filter ? "btn-primary" : "btn-outline-secondary")" @onclick="() => _filter = filter">@filter</button>
+            }
+        </div>
+    </div>
+
+    <EditForm Model="_draft" OnValidSubmit="AddAsync" class="p-3 border-bottom">
+        <DataAnnotationsValidator />
+        <div class="row g-2">
+            <div class="col-12">
+                <InputText class="form-control" placeholder="Add a task and press Enter…" @bind-Value="_draft.Title" aria-label="Task title" />
+                <ValidationMessage For="() => _draft.Title" />
+            </div>
+            <div class="col-sm-4">
+                <InputSelect class="form-select form-select-sm" @bind-Value="_draft.Priority" aria-label="Priority">
+                    @foreach (var priority in Enum.GetValues<TodoPriority>())
+                    {
+                        <option value="@priority">@priority priority</option>
+                    }
+                </InputSelect>
+            </div>
+            <div class="col-sm-4">
+                <InputDate class="form-control form-control-sm" @bind-Value="_draft.DueDate" aria-label="Due date" />
+            </div>
+            <div class="col-sm-4 d-grid">
+                <button type="submit" class="btn btn-sm btn-primary"><i class="bi bi-plus-lg me-1"></i>Add task</button>
+            </div>
+            <div class="col-12">
+                <InputTextArea class="form-control form-control-sm" rows="1" placeholder="Notes (optional)" @bind-Value="_draft.Notes" aria-label="Notes" />
+            </div>
+        </div>
+    </EditForm>
+
+    @if (VisibleItems.Count == 0)
+    {
+        <div class="empty-state">
+            <i class="bi bi-clipboard-check"></i>
+            @(_items.Count == 0 ? "No tasks yet. Add the first one above." : "Nothing to show for this filter.")
+        </div>
+    }
+    else
+    {
+        <div>
+            @foreach (var item in VisibleItems)
+            {
+                <div class="todo-item @(item.IsCompleted ? "completed" : null)" @key="item.Id">
+                    <input class="form-check-input" type="checkbox" checked="@item.IsCompleted" aria-label="Toggle completion"
+                           @onchange="e => ToggleAsync(item, e.Value is true)" />
+                    <div class="flex-grow-1 min-w-0">
+                        <div class="todo-title fw-medium">@item.Title</div>
+                        @if (!string.IsNullOrWhiteSpace(item.Notes))
+                        {
+                            <div class="small text-body-secondary">@item.Notes</div>
+                        }
+                        <div class="d-flex flex-wrap gap-2 mt-1 small align-items-center">
+                            <PriorityBadge Priority="item.Priority" />
+                            @if (item.DueDate is { } due)
+                            {
+                                <span class="@(item.IsOverdue(Today) ? "text-danger fw-semibold" : "text-body-secondary")">
+                                    <i class="bi bi-calendar-event me-1"></i>@Display.Date(due)@(item.IsOverdue(Today) ? " · overdue" : null)
+                                </span>
+                            }
+                            @if (item.CompletedAt is { } completedAt)
+                            {
+                                <span class="text-success"><i class="bi bi-check2 me-1"></i>Done @Display.Relative(completedAt, Now)</span>
+                            }
+                        </div>
+                    </div>
+                    @if (_pendingDeleteId == item.Id)
+                    {
+                        <div class="btn-group btn-group-sm">
+                            <button type="button" class="btn btn-danger" @onclick="() => DeleteAsync(item)">Delete</button>
+                            <button type="button" class="btn btn-outline-secondary" @onclick="() => _pendingDeleteId = null">Keep</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <button type="button" class="btn btn-sm btn-link text-body-secondary" title="Delete task" @onclick="() => _pendingDeleteId = item.Id">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private List<TodoItem> _items = [];
+    private TodoDraft _draft = new();
+    private TodoFilter _filter = TodoFilter.Open;
+    private int? _pendingDeleteId;
+    private int? _loadedScope;
+    private bool _hasLoaded;
+
+    [Parameter]
+    public int? ProjectId { get; set; }
+
+    [Parameter]
+    public EventCallback OnChanged { get; set; }
+
+    private DateTime Now => Clock.GetUtcNow().UtcDateTime;
+
+    private DateOnly Today => DateOnly.FromDateTime(Now);
+
+    private List<TodoItem> VisibleItems => _items
+        .Where(i => _filter switch
+        {
+            TodoFilter.Open => !i.IsCompleted,
+            TodoFilter.Done => i.IsCompleted,
+            _ => true
+        })
+        .OrderBy(i => i.IsCompleted)
+        .ThenByDescending(i => i.Priority)
+        .ThenBy(i => i.DueDate ?? DateOnly.MaxValue)
+        .ThenBy(i => i.CreatedAt)
+        .ToList();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedScope == ProjectId && _hasLoaded)
+        {
+            return;
+        }
+
+        _loadedScope = ProjectId;
+        _hasLoaded = true;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _items = await db.TodoItems
+            .AsNoTracking()
+            .Where(t => t.WorkspaceProjectId == ProjectId)
+            .ToListAsync();
+    }
+
+    private async Task AddAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        db.TodoItems.Add(new TodoItem
+        {
+            WorkspaceProjectId = ProjectId,
+            Title = _draft.Title.Trim(),
+            Notes = string.IsNullOrWhiteSpace(_draft.Notes) ? null : _draft.Notes.Trim(),
+            Priority = _draft.Priority,
+            DueDate = _draft.DueDate,
+            CreatedAt = Now
+        });
+        await db.SaveChangesAsync();
+
+        _draft = new TodoDraft { Priority = _draft.Priority };
+        _filter = _filter == TodoFilter.Done ? TodoFilter.Open : _filter;
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task ToggleAsync(TodoItem item, bool completed)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var tracked = await db.TodoItems.SingleOrDefaultAsync(t => t.Id == item.Id);
+        if (tracked is not null)
+        {
+            tracked.SetCompleted(completed, Now);
+            await db.SaveChangesAsync();
+        }
+
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task DeleteAsync(TodoItem item)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        await db.TodoItems.Where(t => t.Id == item.Id).ExecuteDeleteAsync();
+
+        _pendingDeleteId = null;
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private enum TodoFilter
+    {
+        Open,
+        Done,
+        All
+    }
+
+    private sealed class TodoDraft
+    {
+        [Required(ErrorMessage = "Give the task a title.")]
+        [StringLength(200)]
+        public string Title { get; set; } = string.Empty;
+
+        [StringLength(4000)]
+        public string? Notes { get; set; }
+
+        public TodoPriority Priority { get; set; } = TodoPriority.Medium;
+
+        public DateOnly? DueDate { get; set; }
+    }
+}

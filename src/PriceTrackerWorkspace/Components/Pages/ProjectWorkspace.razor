@@ -1,0 +1,186 @@
+@page "/projects/{Id:int}"
+@page "/wishlist"
+@using System.ComponentModel.DataAnnotations
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject NavigationManager Navigation
+
+<PageTitle>@(_project?.Name ?? "General Workspace")</PageTitle>
+
+@if (_loading)
+{
+    <div class="d-flex align-items-center gap-2 text-body-secondary">
+        <span class="spinner-border spinner-border-sm"></span> Loading workspace…
+    </div>
+}
+else if (Id is not null && _project is null)
+{
+    <div class="surface-card empty-state">
+        <i class="bi bi-folder-x"></i>
+        <h1 class="h5">Project not found</h1>
+        <p>It may have been deleted.</p>
+        <a href="projects" class="btn btn-primary btn-sm">Back to projects</a>
+    </div>
+}
+else
+{
+    <div class="page-header">
+        <div class="min-w-0">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb small mb-1">
+                    <li class="breadcrumb-item"><a href="">Dashboard</a></li>
+                    @if (_project is not null)
+                    {
+                        <li class="breadcrumb-item"><a href="projects">Projects</a></li>
+                    }
+                    <li class="breadcrumb-item active" aria-current="page">@(_project?.Name ?? "General Workspace")</li>
+                </ol>
+            </nav>
+
+            @if (_editing && _project is not null)
+            {
+                <EditForm Model="_edit" OnValidSubmit="SaveProjectAsync" class="mt-2" style="max-width: 640px;">
+                    <DataAnnotationsValidator />
+                    <div class="row g-2">
+                        <div class="col-md-8">
+                            <InputText class="form-control" @bind-Value="_edit.Name" aria-label="Project name" />
+                            <ValidationMessage For="() => _edit.Name" />
+                        </div>
+                        <div class="col-md-4">
+                            <div class="input-group">
+                                <span class="input-group-text">Budget</span>
+                                <InputNumber class="form-control" step="0.01" @bind-Value="_edit.TargetBudget" aria-label="Target budget" />
+                            </div>
+                            <ValidationMessage For="() => _edit.TargetBudget" />
+                        </div>
+                        <div class="col-12">
+                            <InputTextArea class="form-control" rows="2" placeholder="Description" @bind-Value="_edit.Description" aria-label="Description" />
+                        </div>
+                        <div class="col-12 d-flex gap-2">
+                            <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-check-lg me-1"></i>Save</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="() => _editing = false">Cancel</button>
+                        </div>
+                    </div>
+                </EditForm>
+            }
+            else
+            {
+                <h1>
+                    @if (_project is null)
+                    {
+                        <i class="bi bi-bag-heart text-primary me-2"></i>
+                        <span>General Workspace</span>
+                    }
+                    else
+                    {
+                        <i class="bi bi-folder2-open text-primary me-2"></i>
+                        <span>@_project.Name</span>
+                    }
+                </h1>
+                <p class="lead">
+                    @(_project is null
+                        ? "Standalone tasks and wishlist items that are not linked to a project."
+                        : string.IsNullOrWhiteSpace(_project.Description) ? "No description yet." : _project.Description)
+                </p>
+            }
+        </div>
+
+        @if (_project is not null && !_editing)
+        {
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+                <span class="badge text-bg-light border fs-6 fw-normal">
+                    <i class="bi bi-piggy-bank me-1"></i>
+                    @(_project.TargetBudget is { } budget ? $"Budget {Display.Money(budget, null)}" : "No budget set")
+                </span>
+                <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="BeginEdit">
+                    <i class="bi bi-pencil me-1"></i>Edit
+                </button>
+            </div>
+        }
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xxl-5 col-xl-5">
+            <TodoChecklist ProjectId="Id" OnChanged="ReloadProjectAsync" />
+        </div>
+        <div class="col-xxl-7 col-xl-7">
+            <WishlistPanel ProjectId="Id" TargetBudget="_project?.TargetBudget" OnChanged="ReloadProjectAsync" />
+        </div>
+    </div>
+}
+
+@code {
+    private WorkspaceProject? _project;
+    private ProjectEdit _edit = new();
+    private bool _loading = true;
+    private bool _editing;
+
+    [Parameter]
+    public int? Id { get; set; }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _editing = false;
+        await ReloadProjectAsync();
+        _loading = false;
+    }
+
+    private async Task ReloadProjectAsync()
+    {
+        if (Id is null)
+        {
+            _project = null;
+            return;
+        }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _project = await db.WorkspaceProjects.AsNoTracking().SingleOrDefaultAsync(p => p.Id == Id);
+    }
+
+    private void BeginEdit()
+    {
+        if (_project is null)
+        {
+            return;
+        }
+
+        _edit = new ProjectEdit
+        {
+            Name = _project.Name,
+            Description = _project.Description,
+            TargetBudget = _project.TargetBudget
+        };
+        _editing = true;
+    }
+
+    private async Task SaveProjectAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var project = await db.WorkspaceProjects.SingleOrDefaultAsync(p => p.Id == Id);
+        if (project is null)
+        {
+            Navigation.NavigateTo("projects");
+            return;
+        }
+
+        project.Name = _edit.Name.Trim();
+        project.Description = string.IsNullOrWhiteSpace(_edit.Description) ? null : _edit.Description.Trim();
+        project.TargetBudget = _edit.TargetBudget;
+        await db.SaveChangesAsync();
+
+        _editing = false;
+        await ReloadProjectAsync();
+    }
+
+    private sealed class ProjectEdit
+    {
+        [Required(ErrorMessage = "A project needs a name.")]
+        [StringLength(120)]
+        public string Name { get; set; } = string.Empty;
+
+        [StringLength(2000)]
+        public string? Description { get; set; }
+
+        [Range(typeof(decimal), "0", "999999999", ErrorMessage = "Budget must be a positive amount.")]
+        public decimal? TargetBudget { get; set; }
+    }
+}

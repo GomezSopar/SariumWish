@@ -1,0 +1,534 @@
+@using System.ComponentModel.DataAnnotations
+@implements IDisposable
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject IScraperService Scraper
+@inject TimeProvider Clock
+
+<div class="surface-card h-100">
+    <div class="card-header d-flex align-items-center gap-2">
+        <i class="bi bi-bag-heart text-primary"></i>
+        <span>Product wishlist</span>
+        <span class="badge rounded-pill text-bg-secondary">@_items.Count items</span>
+    </div>
+
+    <div class="calculator-bar">
+        <div class="d-flex flex-wrap align-items-end gap-4">
+            <div>
+                <div class="small text-body-secondary text-uppercase fw-semibold">Included total</div>
+                <div class="calculator-total">@Display.Money(Totals.Primary)</div>
+                <div class="small text-body-secondary">
+                    @Totals.IncludedCount of @_items.Count items counted
+                    @if (Totals.ByCurrency.Count > 1)
+                    {
+                        <span> · also @Display.Totals(Totals.ByCurrency.Skip(1).ToList())</span>
+                    }
+                </div>
+            </div>
+
+            <div>
+                <div class="small text-body-secondary text-uppercase fw-semibold">Price drops</div>
+                @if (Totals.PriceDropCount > 0)
+                {
+                    <div class="fw-semibold price-drop fs-5">
+                        <i class="bi bi-graph-down-arrow me-1"></i>@Totals.PriceDropCount
+                        @if (Totals.PrimarySavings > 0)
+                        {
+                            <span class="small fw-normal">· saving @Display.Money(Totals.PrimarySavings, Totals.Primary.Symbol)</span>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="fs-5 text-body-secondary">None yet</div>
+                }
+            </div>
+
+            @if (Totals.BudgetUtilization(TargetBudget) is { } utilization)
+            {
+                <div class="flex-grow-1" style="min-width: 180px; max-width: 320px;">
+                    <div class="small text-body-secondary text-uppercase fw-semibold d-flex justify-content-between">
+                        <span>Budget</span>
+                        <span>@Display.Money(TargetBudget!.Value, Totals.Primary.Symbol)</span>
+                    </div>
+                    <div class="progress mt-1" role="progressbar" aria-valuenow="@((int)(utilization * 100))" aria-valuemin="0" aria-valuemax="100" style="height: 10px;">
+                        <div class="progress-bar @(utilization > 1 ? "bg-danger" : utilization > 0.85 ? "bg-warning" : "bg-success")" style="width: @(Math.Min(utilization, 1) * 100)%"></div>
+                    </div>
+                    <div class="small mt-1 @(utilization > 1 ? "text-danger" : "text-body-secondary")">
+                        @(utilization > 1
+                            ? $"{Display.Money(Totals.Primary.Amount - TargetBudget!.Value, Totals.Primary.Symbol)} over budget"
+                            : $"{Display.Percent(utilization)} used · {Display.Money(TargetBudget!.Value - Totals.Primary.Amount, Totals.Primary.Symbol)} left")
+                    </div>
+                </div>
+            }
+
+            <div class="ms-auto">
+                @if (_refreshCts is null)
+                {
+                    <button type="button" class="btn btn-primary" disabled="@(_items.Count == 0)" @onclick="RefreshAllAsync">
+                        <i class="bi bi-arrow-repeat me-1"></i>Refresh All Prices
+                    </button>
+                }
+                else
+                {
+                    <button type="button" class="btn btn-outline-danger" @onclick="CancelRefresh">
+                        <i class="bi bi-stop-circle me-1"></i>Cancel
+                    </button>
+                }
+            </div>
+        </div>
+
+        @if (_progress is { } progress)
+        {
+            <div class="mt-3">
+                <div class="d-flex justify-content-between small mb-1">
+                    <span>
+                        <span class="spinner-border spinner-border-sm me-1"></span>
+                        Refreshing @progress.Completed of @progress.Total
+                    </span>
+                    @if (progress.LastResult is { } last)
+                    {
+                        <span class="text-body-secondary">Last: @NameOf(last.WishlistItemId) — @last.Status</span>
+                    }
+                </div>
+                <div class="progress" style="height: 6px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: @(progress.Percent)%"></div>
+                </div>
+            </div>
+        }
+    </div>
+
+    @if (_notice is not null)
+    {
+        <div class="alert @_notice.CssClass alert-dismissible small m-3 mb-0 py-2" role="status">
+            <i class="bi @_notice.Icon me-1"></i>@_notice.Message
+            <button type="button" class="btn-close btn-sm py-2" aria-label="Dismiss" @onclick="() => _notice = null"></button>
+        </div>
+    }
+
+    <EditForm Model="_draft" OnValidSubmit="AddAsync" class="p-3 border-bottom">
+        <DataAnnotationsValidator />
+        <div class="row g-2 align-items-start">
+            <div class="col-md-6">
+                <InputText class="form-control" placeholder="https://store.example.com/product/…" @bind-Value="_draft.ProductUrl" aria-label="Product URL" />
+                <ValidationMessage For="() => _draft.ProductUrl" />
+            </div>
+            <div class="col-md-4">
+                <InputText class="form-control" placeholder="Name (optional — uses page title)" @bind-Value="_draft.ProductName" aria-label="Product name" />
+            </div>
+            <div class="col-md-2 d-grid">
+                <button type="submit" class="btn btn-primary" disabled="@_adding">
+                    @if (_adding)
+                    {
+                        <span class="spinner-border spinner-border-sm"></span>
+                    }
+                    else
+                    {
+                        <span><i class="bi bi-plus-lg me-1"></i>Track</span>
+                    }
+                </button>
+            </div>
+            <div class="col-12 d-flex flex-wrap gap-3 align-items-center small">
+                <div class="form-check mb-0">
+                    <InputCheckbox class="form-check-input" id="wishlist-include" @bind-Value="_draft.IsIncludedInTotal" />
+                    <label class="form-check-label" for="wishlist-include">Include in total</label>
+                </div>
+                <button type="button" class="btn btn-link btn-sm p-0" @onclick="() => _showAdvanced = !_showAdvanced">
+                    <i class="bi @(_showAdvanced ? "bi-chevron-up" : "bi-chevron-down") me-1"></i>Custom selector override
+                </button>
+            </div>
+            @if (_showAdvanced)
+            {
+                <div class="col-12">
+                    <InputText class="form-control form-control-sm selector-code" placeholder="CSS selector used before the domain rule, e.g. #price .amount" @bind-Value="_draft.CustomCssSelectorOverride" aria-label="Custom CSS selector override" />
+                </div>
+            }
+        </div>
+    </EditForm>
+
+    @if (_items.Count == 0)
+    {
+        <div class="empty-state">
+            <i class="bi bi-cart-plus"></i>
+            Paste a product URL above to start tracking its price.
+        </div>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-hover wishlist-table mb-0">
+                <thead class="small text-body-secondary">
+                    <tr>
+                        <th class="ps-3" title="Include in total"><i class="bi bi-calculator"></i></th>
+                        <th>Product</th>
+                        <th class="text-end">Price</th>
+                        <th>Status</th>
+                        <th>Checked</th>
+                        <th class="text-end pe-3">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var item in _items)
+                    {
+                        var busy = _busy.Contains(item.Id);
+                        <tr @key="item.Id" class="@(item.IsIncludedInTotal ? null : "opacity-75")">
+                            <td class="ps-3">
+                                <input class="form-check-input" type="checkbox" checked="@item.IsIncludedInTotal" aria-label="Include in total"
+                                       @onchange="e => SetIncludedAsync(item, e.Value is true)" />
+                            </td>
+                            <td class="product-cell">
+                                <a href="@item.ProductUrl" target="_blank" rel="noopener noreferrer" class="fw-medium d-block text-truncate" title="@item.ProductName">@item.ProductName</a>
+                                <span class="badge domain-badge">@item.NormalizedDomain</span>
+                                @if (!string.IsNullOrWhiteSpace(item.CustomCssSelectorOverride))
+                                {
+                                    <span class="badge text-bg-light border ms-1" title="@item.CustomCssSelectorOverride"><i class="bi bi-pin-angle me-1"></i>override</span>
+                                }
+                            </td>
+                            <td class="text-end text-nowrap">
+                                @if (item.HasPrice)
+                                {
+                                    <div class="fw-semibold">@Display.Money(item.CurrentPrice, item.CurrencySymbol)</div>
+                                    @if (item.PreviousPrice is { } previous && item.PriceChange != 0)
+                                    {
+                                        <div class="small @(item.HasPriceDrop ? "price-drop" : "price-rise")" title="Previously @Display.Money(previous, item.CurrencySymbol)">
+                                            <i class="bi @(item.HasPriceDrop ? "bi-arrow-down-right" : "bi-arrow-up-right")"></i>
+                                            @Display.Money(Math.Abs(item.PriceChange), item.CurrencySymbol)
+                                        </div>
+                                    }
+                                }
+                                else
+                                {
+                                    <span class="text-body-secondary">—</span>
+                                }
+                            </td>
+                            <td>
+                                <StatusBadge Status="item.Status" Message="@item.LastErrorMessage" />
+                                @if (item.Status is WishlistItemStatus.NeedsElementSelection or WishlistItemStatus.ScrapeFailed && item.LastErrorMessage is not null)
+                                {
+                                    <div class="small text-body-secondary text-truncate" style="max-width: 220px;" title="@item.LastErrorMessage">@item.LastErrorMessage</div>
+                                }
+                            </td>
+                            <td class="small text-body-secondary text-nowrap" title="@Display.Utc(item.LastScrapedAt)">@Display.Relative(item.LastScrapedAt, Now)</td>
+                            <td class="text-end pe-3 text-nowrap">
+                                @if (_pendingDeleteId == item.Id)
+                                {
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-danger" @onclick="() => DeleteAsync(item)">Delete</button>
+                                        <button type="button" class="btn btn-outline-secondary" @onclick="() => _pendingDeleteId = null">Keep</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn @(item.Status == WishlistItemStatus.NeedsElementSelection ? "btn-warning" : "btn-outline-secondary")"
+                                                title="Pick Price Element" disabled="@busy" @onclick="() => _picker.OpenAsync(item.Id)">
+                                            <i class="bi bi-cursor"></i><span class="d-none d-xl-inline ms-1">Pick</span>
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary" title="Refresh price" disabled="@busy" @onclick="() => RefreshOneAsync(item.Id, openPickerWhenUnresolved: false)">
+                                            @if (busy)
+                                            {
+                                                <span class="spinner-border spinner-border-sm"></span>
+                                            }
+                                            else
+                                            {
+                                                <i class="bi bi-arrow-clockwise"></i>
+                                            }
+                                        </button>
+                                        <button type="button" class="btn btn-outline-danger" title="Delete" disabled="@busy" @onclick="() => _pendingDeleteId = item.Id">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </div>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+<VisualElementPickerModal @ref="_picker" OnSaved="HandlePickerSavedAsync" />
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly HashSet<int> _busy = [];
+
+    private List<WishlistItem> _items = [];
+    private WishlistDraft _draft = new();
+    private VisualElementPickerModal _picker = default!;
+    private CancellationTokenSource? _refreshCts;
+    private RefreshProgress? _progress;
+    private Notice? _notice;
+    private int? _pendingDeleteId;
+    private bool _showAdvanced;
+    private bool _adding;
+    private int? _loadedScope;
+    private bool _hasLoaded;
+
+    [Parameter]
+    public int? ProjectId { get; set; }
+
+    [Parameter]
+    public decimal? TargetBudget { get; set; }
+
+    [Parameter]
+    public EventCallback OnChanged { get; set; }
+
+    private DateTime Now => Clock.GetUtcNow().UtcDateTime;
+
+    private WishlistTotals Totals => WishlistTotals.From(_items);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedScope == ProjectId && _hasLoaded)
+        {
+            return;
+        }
+
+        _loadedScope = ProjectId;
+        _hasLoaded = true;
+        await LoadAsync();
+    }
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+        _refreshCts?.Dispose();
+    }
+
+    private async Task LoadAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _items = await db.WishlistItems
+            .AsNoTracking()
+            .Where(w => w.WorkspaceProjectId == ProjectId)
+            .OrderByDescending(w => w.CreatedAt)
+            .ThenByDescending(w => w.Id)
+            .ToListAsync();
+    }
+
+    private async Task AddAsync()
+    {
+        if (!DomainNormalizer.TryNormalizeUrl(_draft.ProductUrl, out var domain))
+        {
+            _notice = Notice.Error("Enter an absolute http(s) product URL.");
+            return;
+        }
+
+        _adding = true;
+        int newItemId;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var item = new WishlistItem
+            {
+                WorkspaceProjectId = ProjectId,
+                ProductUrl = _draft.ProductUrl.Trim(),
+                ProductName = string.IsNullOrWhiteSpace(_draft.ProductName) ? domain : _draft.ProductName.Trim(),
+                NormalizedDomain = domain,
+                IsIncludedInTotal = _draft.IsIncludedInTotal,
+                CustomCssSelectorOverride = string.IsNullOrWhiteSpace(_draft.CustomCssSelectorOverride) ? null : _draft.CustomCssSelectorOverride.Trim(),
+                CreatedAt = Now
+            };
+            db.WishlistItems.Add(item);
+            await db.SaveChangesAsync();
+            newItemId = item.Id;
+        }
+        finally
+        {
+            _adding = false;
+        }
+
+        _draft = new WishlistDraft();
+        _showAdvanced = false;
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+        await RefreshOneAsync(newItemId, openPickerWhenUnresolved: true);
+    }
+
+    private async Task RefreshOneAsync(int itemId, bool openPickerWhenUnresolved)
+    {
+        _busy.Add(itemId);
+        StateHasChanged();
+
+        try
+        {
+            var result = await Scraper.RefreshItemAsync(itemId, _lifetime.Token);
+            _notice = DescribeResult(result);
+
+            if (openPickerWhenUnresolved && result.Status == WishlistItemStatus.NeedsElementSelection)
+            {
+                await _picker.OpenAsync(itemId);
+            }
+        }
+        catch (KeyNotFoundException)
+        {
+            _notice = Notice.Error("That item was deleted before it could be refreshed.");
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            _busy.Remove(itemId);
+        }
+
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private Task RefreshAllAsync() => RefreshManyAsync([.. _items.Select(i => i.Id)]);
+
+    private async Task RefreshManyAsync(IReadOnlyList<int> itemIds, string? leadingMessage = null)
+    {
+        if (itemIds.Count == 0 || _refreshCts is not null)
+        {
+            return;
+        }
+
+        _refreshCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var token = _refreshCts.Token;
+        _busy.UnionWith(itemIds);
+        _notice = null;
+
+        var progress = new Progress<RefreshProgress>(report => _ = InvokeAsync(async () =>
+        {
+            if (_refreshCts is null || token.IsCancellationRequested)
+            {
+                return;
+            }
+
+            _progress = report;
+            if (report.LastResult is { } last)
+            {
+                _busy.Remove(last.WishlistItemId);
+                await LoadAsync();
+            }
+
+            StateHasChanged();
+        }));
+
+        try
+        {
+            var results = await Scraper.RefreshItemsAsync(itemIds, progress, token);
+            var verified = results.Count(r => r.Succeeded);
+            var unresolved = results.Count - verified;
+
+            var summary = unresolved == 0
+                ? $"{verified} price{(verified == 1 ? string.Empty : "s")} refreshed successfully."
+                : $"{verified} of {results.Count} prices refreshed; {unresolved} need attention (pick the price element or retry).";
+            var message = leadingMessage is null ? summary : $"{leadingMessage} {summary}";
+
+            _notice = unresolved == 0 ? Notice.Success(message) : Notice.Warning(message);
+        }
+        catch (OperationCanceledException) when (!_lifetime.IsCancellationRequested)
+        {
+            _notice = Notice.Warning("Refresh cancelled. Items already processed keep their new prices.");
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            _busy.ExceptWith(itemIds);
+            _refreshCts?.Dispose();
+            _refreshCts = null;
+            _progress = null;
+        }
+
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private void CancelRefresh() => _refreshCts?.Cancel();
+
+    private async Task SetIncludedAsync(WishlistItem item, bool included)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        await db.WishlistItems
+            .Where(w => w.Id == item.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(w => w.IsIncludedInTotal, included));
+
+        item.IsIncludedInTotal = included;
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task DeleteAsync(WishlistItem item)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        await db.WishlistItems.Where(w => w.Id == item.Id).ExecuteDeleteAsync();
+
+        _pendingDeleteId = null;
+        _notice = Notice.Info($"Stopped tracking {item.ProductName}.");
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task HandlePickerSavedAsync(PickerSavedEventArgs args)
+    {
+        var saved = args.Result.Item;
+        var domain = _items.FirstOrDefault(i => i.Id == saved.WishlistItemId)?.NormalizedDomain ?? "this domain";
+        var price = saved.Price is { } amount ? Display.Money(amount, saved.CurrencySymbol) : "—";
+
+        var savedMessage = $"Selector saved for {domain}; price updated to {price}.";
+        _notice = Notice.Success(savedMessage);
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+
+        if (args.RecheckDomainItems && args.Result.OtherDomainItemIds.Count > 0)
+        {
+            await RefreshManyAsync(args.Result.OtherDomainItemIds, $"{savedMessage} Re-checked other {domain} items:");
+        }
+    }
+
+    private string NameOf(int itemId) => _items.FirstOrDefault(i => i.Id == itemId)?.ProductName ?? $"Item #{itemId}";
+
+    private Notice DescribeResult(ScrapeResult result) => result.Status switch
+    {
+        WishlistItemStatus.Verified => Notice.Success(
+            $"{NameOf(result.WishlistItemId)}: {Display.Money(result.Price ?? 0, result.CurrencySymbol)} via {DescribeSource(result.Source)}."),
+        WishlistItemStatus.NeedsElementSelection => Notice.Warning(
+            $"{NameOf(result.WishlistItemId)}: {result.Message ?? "no price detected"}"),
+        _ => Notice.Error($"{NameOf(result.WishlistItemId)}: {result.Message ?? "scrape failed"}")
+    };
+
+    private static string DescribeSource(ScrapeSource source) => source switch
+    {
+        ScrapeSource.ItemOverride => "the item's selector override",
+        ScrapeSource.DomainRule => "the learned domain rule",
+        ScrapeSource.Heuristic => "heuristic detection",
+        ScrapeSource.VisualPicker => "the visual picker",
+        _ => "an unknown source"
+    };
+
+    private sealed record Notice(string CssClass, string Icon, string Message)
+    {
+        public static Notice Success(string message) => new("alert-success", "bi-check-circle", message);
+
+        public static Notice Warning(string message) => new("alert-warning", "bi-exclamation-triangle", message);
+
+        public static Notice Error(string message) => new("alert-danger", "bi-x-octagon", message);
+
+        public static Notice Info(string message) => new("alert-secondary", "bi-info-circle", message);
+    }
+
+    private sealed class WishlistDraft
+    {
+        [Required(ErrorMessage = "Paste the product page URL.")]
+        [Url(ErrorMessage = "Enter a valid absolute URL.")]
+        [StringLength(2048)]
+        public string ProductUrl { get; set; } = string.Empty;
+
+        [StringLength(300)]
+        public string? ProductName { get; set; }
+
+        [StringLength(1024)]
+        public string? CustomCssSelectorOverride { get; set; }
+
+        public bool IsIncludedInTotal { get; set; } = true;
+    }
+}
