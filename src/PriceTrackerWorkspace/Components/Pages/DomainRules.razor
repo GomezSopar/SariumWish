@@ -1,0 +1,338 @@
+@page "/domain-rules"
+@using System.ComponentModel.DataAnnotations
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject IScraperService Scraper
+@inject TimeProvider Clock
+
+<PageTitle>Domain Rules</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1><i class="bi bi-braces-asterisk text-primary me-2"></i>Domain selector registry</h1>
+        <p class="lead">Every site the scraper has learned, with the CSS selector it trusts and how reliable that selector has been.</p>
+    </div>
+    <div style="min-width: 260px;">
+        <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input type="search" class="form-control" placeholder="Filter domains or selectors" @bind="_filter" @bind:event="oninput" aria-label="Filter rules" />
+        </div>
+    </div>
+</div>
+
+@if (_notice is not null)
+{
+    <div class="alert @(_noticeIsError ? "alert-danger" : "alert-success") alert-dismissible small py-2" role="status">
+        @_notice
+        <button type="button" class="btn-close btn-sm py-2" aria-label="Dismiss" @onclick="() => _notice = null"></button>
+    </div>
+}
+
+<div class="surface-card mb-4">
+    <div class="card-header"><i class="bi bi-plus-circle me-2 text-primary"></i>Add a rule manually</div>
+    <EditForm Model="_draft" OnValidSubmit="CreateAsync" class="p-3">
+        <DataAnnotationsValidator />
+        <div class="row g-2 align-items-start">
+            <div class="col-md-3">
+                <InputText class="form-control" placeholder="store.example.com" @bind-Value="_draft.Domain" aria-label="Domain" />
+                <ValidationMessage For="() => _draft.Domain" />
+            </div>
+            <div class="col-md-4">
+                <InputText class="form-control selector-code" placeholder="Price selector, e.g. [itemprop=price]" @bind-Value="_draft.PriceCssSelector" aria-label="Price CSS selector" />
+                <ValidationMessage For="() => _draft.PriceCssSelector" />
+            </div>
+            <div class="col-md-3">
+                <InputText class="form-control selector-code" placeholder="Title selector (optional)" @bind-Value="_draft.TitleCssSelector" aria-label="Title CSS selector" />
+            </div>
+            <div class="col-md-2 d-grid">
+                <button type="submit" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>Add rule</button>
+            </div>
+        </div>
+    </EditForm>
+</div>
+
+<div class="surface-card">
+    @if (_rules is null)
+    {
+        <div class="p-4 text-body-secondary"><span class="spinner-border spinner-border-sm me-2"></span>Loading rules…</div>
+    }
+    else if (FilteredRules.Count == 0)
+    {
+        <div class="empty-state">
+            <i class="bi bi-diagram-2"></i>
+            @(_rules.Count == 0
+                ? "No rules learned yet. Refresh a wishlist item or use the visual picker to teach the scraper a domain."
+                : "No rules match the filter.")
+        </div>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table align-middle mb-0">
+                <thead class="small text-body-secondary">
+                    <tr>
+                        <th class="ps-3">Domain</th>
+                        <th style="min-width: 200px;">Price selector</th>
+                        <th>Title selector</th>
+                        <th class="text-end">Success</th>
+                        <th class="text-end">Failure</th>
+                        <th>Reliability</th>
+                        <th>Last verified</th>
+                        <th class="text-end pe-3">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in FilteredRules)
+                    {
+                        var rule = row.Rule;
+                        <tr @key="rule.Id">
+                            <td class="ps-3">
+                                <span class="badge domain-badge">@rule.NormalizedDomain</span>
+                                <div class="small text-body-secondary mt-1">@row.ItemCount tracked item@(row.ItemCount == 1 ? string.Empty : "s")</div>
+                            </td>
+                            @if (_editingId == rule.Id)
+                            {
+                                <td colspan="2">
+                                    <input class="form-control form-control-sm selector-code mb-1" @bind="_editPriceSelector" aria-label="Price selector" />
+                                    <input class="form-control form-control-sm selector-code" placeholder="Title selector (optional)" @bind="_editTitleSelector" aria-label="Title selector" />
+                                    <div class="form-check mt-1 small">
+                                        <input class="form-check-input" type="checkbox" id="reset-@rule.Id" @bind="_editResetCounters" />
+                                        <label class="form-check-label" for="reset-@rule.Id">Reset success/failure counters</label>
+                                    </div>
+                                </td>
+                            }
+                            else
+                            {
+                                <td><code class="selector-code">@rule.PriceCssSelector</code></td>
+                                <td>
+                                    @if (string.IsNullOrWhiteSpace(rule.TitleCssSelector))
+                                    {
+                                        <span class="text-body-secondary small">—</span>
+                                    }
+                                    else
+                                    {
+                                        <code class="selector-code">@rule.TitleCssSelector</code>
+                                    }
+                                </td>
+                            }
+                            <td class="text-end text-success fw-semibold">@rule.SuccessCount</td>
+                            <td class="text-end @(rule.FailureCount > 0 ? "text-danger fw-semibold" : "text-body-secondary")">@rule.FailureCount</td>
+                            <td style="min-width: 120px;">
+                                @if (rule.SuccessCount + rule.FailureCount > 0)
+                                {
+                                    <div class="progress" style="height: 6px;">
+                                        <div class="progress-bar @(rule.SuccessRate >= 0.8 ? "bg-success" : rule.SuccessRate >= 0.5 ? "bg-warning" : "bg-danger")" style="width: @(rule.SuccessRate * 100)%"></div>
+                                    </div>
+                                    <div class="small text-body-secondary">@Display.Percent(rule.SuccessRate)</div>
+                                }
+                                else
+                                {
+                                    <span class="small text-body-secondary">Untested</span>
+                                }
+                            </td>
+                            <td class="small text-body-secondary text-nowrap" title="@Display.Utc(rule.LastVerifiedAt)">@Display.Relative(rule.LastVerifiedAt, Now)</td>
+                            <td class="text-end pe-3 text-nowrap">
+                                @if (_editingId == rule.Id)
+                                {
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-primary" @onclick="() => SaveEditAsync(rule.Id)"><i class="bi bi-check-lg"></i> Save</button>
+                                        <button type="button" class="btn btn-outline-secondary" @onclick="CancelEdit">Cancel</button>
+                                    </div>
+                                }
+                                else if (_pendingDeleteId == rule.Id)
+                                {
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-danger" @onclick="() => DeleteAsync(rule.Id)">Delete</button>
+                                        <button type="button" class="btn btn-outline-secondary" @onclick="() => _pendingDeleteId = null">Keep</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-outline-secondary" title="Re-check tracked items with this rule"
+                                                disabled="@(row.ItemCount == 0 || _recheckingDomain is not null)" @onclick="() => RecheckAsync(rule.NormalizedDomain)">
+                                            @if (_recheckingDomain == rule.NormalizedDomain)
+                                            {
+                                                <span class="spinner-border spinner-border-sm"></span>
+                                            }
+                                            else
+                                            {
+                                                <i class="bi bi-arrow-repeat"></i>
+                                            }
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary" title="Edit" @onclick="() => BeginEdit(rule)"><i class="bi bi-pencil"></i></button>
+                                        <button type="button" class="btn btn-outline-danger" title="Delete" @onclick="() => _pendingDeleteId = rule.Id"><i class="bi bi-trash"></i></button>
+                                    </div>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@code {
+    private List<RuleRow>? _rules;
+    private RuleDraft _draft = new();
+    private string _filter = string.Empty;
+    private int? _editingId;
+    private string _editPriceSelector = string.Empty;
+    private string? _editTitleSelector;
+    private bool _editResetCounters;
+    private int? _pendingDeleteId;
+    private string? _recheckingDomain;
+    private string? _notice;
+    private bool _noticeIsError;
+
+    private DateTime Now => Clock.GetUtcNow().UtcDateTime;
+
+    private List<RuleRow> FilteredRules => (_rules ?? [])
+        .Where(r => _filter.Length == 0
+            || r.Rule.NormalizedDomain.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+            || r.Rule.PriceCssSelector.Contains(_filter, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        var itemCounts = await db.WishlistItems
+            .GroupBy(w => w.NormalizedDomain)
+            .Select(g => new { Domain = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(g => g.Domain, g => g.Count);
+
+        var rules = await db.DomainScrapeRules
+            .AsNoTracking()
+            .OrderBy(r => r.NormalizedDomain)
+            .ToListAsync();
+
+        _rules = [.. rules.Select(r => new RuleRow(r, itemCounts.GetValueOrDefault(r.NormalizedDomain)))];
+    }
+
+    private async Task CreateAsync()
+    {
+        if (!DomainNormalizer.TryNormalizeDomainInput(_draft.Domain, out var domain))
+        {
+            ShowNotice("Enter a valid domain such as store.example.com.", isError: true);
+            return;
+        }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        if (await db.DomainScrapeRules.AnyAsync(r => r.NormalizedDomain == domain))
+        {
+            ShowNotice($"A rule for {domain} already exists — edit it instead.", isError: true);
+            return;
+        }
+
+        db.DomainScrapeRules.Add(new DomainScrapeRule
+        {
+            NormalizedDomain = domain,
+            PriceCssSelector = _draft.PriceCssSelector.Trim(),
+            TitleCssSelector = string.IsNullOrWhiteSpace(_draft.TitleCssSelector) ? null : _draft.TitleCssSelector.Trim(),
+            LastVerifiedAt = Now
+        });
+        await db.SaveChangesAsync();
+
+        _draft = new RuleDraft();
+        ShowNotice($"Rule for {domain} added.", isError: false);
+        await LoadAsync();
+    }
+
+    private void BeginEdit(DomainScrapeRule rule)
+    {
+        _pendingDeleteId = null;
+        _editingId = rule.Id;
+        _editPriceSelector = rule.PriceCssSelector;
+        _editTitleSelector = rule.TitleCssSelector;
+        _editResetCounters = false;
+    }
+
+    private void CancelEdit() => _editingId = null;
+
+    private async Task SaveEditAsync(int ruleId)
+    {
+        if (string.IsNullOrWhiteSpace(_editPriceSelector))
+        {
+            ShowNotice("The price selector cannot be empty.", isError: true);
+            return;
+        }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var rule = await db.DomainScrapeRules.SingleOrDefaultAsync(r => r.Id == ruleId);
+        if (rule is not null)
+        {
+            rule.PriceCssSelector = _editPriceSelector.Trim();
+            rule.TitleCssSelector = string.IsNullOrWhiteSpace(_editTitleSelector) ? null : _editTitleSelector.Trim();
+
+            if (_editResetCounters)
+            {
+                rule.SuccessCount = 0;
+                rule.FailureCount = 0;
+            }
+
+            await db.SaveChangesAsync();
+            ShowNotice($"Rule for {rule.NormalizedDomain} updated.", isError: false);
+        }
+
+        _editingId = null;
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(int ruleId)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        await db.DomainScrapeRules.Where(r => r.Id == ruleId).ExecuteDeleteAsync();
+
+        _pendingDeleteId = null;
+        ShowNotice("Rule deleted. Items on that domain will fall back to heuristic detection.", isError: false);
+        await LoadAsync();
+    }
+
+    private async Task RecheckAsync(string domain)
+    {
+        _recheckingDomain = domain;
+        try
+        {
+            List<int> itemIds;
+            await using (var db = await DbFactory.CreateDbContextAsync())
+            {
+                itemIds = await db.WishlistItems.Where(w => w.NormalizedDomain == domain).Select(w => w.Id).ToListAsync();
+            }
+
+            var results = await Scraper.RefreshItemsAsync(itemIds);
+            var verified = results.Count(r => r.Succeeded);
+            ShowNotice($"Re-checked {results.Count} item(s) on {domain}: {verified} verified.", isError: verified < results.Count);
+        }
+        finally
+        {
+            _recheckingDomain = null;
+        }
+
+        await LoadAsync();
+    }
+
+    private void ShowNotice(string message, bool isError)
+    {
+        _notice = message;
+        _noticeIsError = isError;
+    }
+
+    private sealed record RuleRow(DomainScrapeRule Rule, int ItemCount);
+
+    private sealed class RuleDraft
+    {
+        [Required(ErrorMessage = "Enter the domain.")]
+        [StringLength(253)]
+        public string Domain { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "Enter the price selector.")]
+        [StringLength(1024)]
+        public string PriceCssSelector { get; set; } = string.Empty;
+
+        [StringLength(1024)]
+        public string? TitleCssSelector { get; set; }
+    }
+}
