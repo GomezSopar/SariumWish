@@ -100,7 +100,7 @@ The inspector builds selectors that resist churn. It prefers unique non-generate
 ### Run
 
 ```bash
-git clone <repository-url>
+git clone [<repository-url>](https://github.com/GomezSopar/SariumWish)
 cd <repository-folder>
 dotnet restore
 dotnet build
